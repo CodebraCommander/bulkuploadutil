@@ -79,10 +79,10 @@ class BulkData:
 
     def subset(self, num_properties):
         subset_props = self.properties[:num_properties]
-        prop_ids = {p["EntityID"] for p in subset_props}
-        subset_history = [h for h in self.history if h["EntityID"] in prop_ids]
-        lineitem_ids = {h["LineItemId"] for h in subset_history}
-        subset_lineitems = [li for li in self.lineitems if li["LineItemId"] in lineitem_ids]
+        prop_ids = {p["entityid"] for p in subset_props}
+        subset_history = [h for h in self.history if h["entityid"] in prop_ids]
+        lineitem_ids = {h["lineitemid"] for h in subset_history}
+        subset_lineitems = [li for li in self.lineitems if li["lineitemid"] in lineitem_ids]
         return BulkData(subset_props, subset_lineitems, subset_history)
 
     def write_zip(self, path, date_suffix="20200101"):

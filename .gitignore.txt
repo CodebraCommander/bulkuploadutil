@@ -1,0 +1,7 @@
+# Temporary extraction directory
+temp_extract/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class

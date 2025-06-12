@@ -96,6 +96,36 @@ class BulkData:
         
         return BulkData(subset_props, subset_lineitems, subset_history)
 
+    def split(self, batch_size):
+        """
+        Split the data into multiple BulkData objects with batch_size properties each.
+        Returns a list of BulkData objects.
+        """
+        if batch_size <= 0:
+            raise ValueError("Batch size must be greater than 0")
+        
+        batches = []
+        for i in range(0, len(self.properties), batch_size):
+            batch_props = self.properties[i:i+batch_size]
+            
+            # Create case-insensitive sets for matching
+            prop_ids_lower = {p["entityid"].lower() if p["entityid"] else "" for p in batch_props}
+            
+            # Use case-insensitive matching for history entries
+            batch_history = [h for h in self.history 
+                            if h["entityid"] and h["entityid"].lower() in prop_ids_lower]
+            
+            # Create case-insensitive set of line item IDs
+            lineitem_ids_lower = {h["lineitemid"].lower() if h["lineitemid"] else "" for h in batch_history}
+            
+            # Use case-insensitive matching for line items
+            batch_lineitems = [li for li in self.lineitems 
+                              if li["lineitemid"] and li["lineitemid"].lower() in lineitem_ids_lower]
+            
+            batches.append(BulkData(batch_props, batch_lineitems, batch_history))
+            
+        return batches
+
     def write_zip(self, path, date_suffix="20200101"):
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
             def write_tsv(name, rows):
@@ -247,6 +277,12 @@ def main(argv=None):
     s.add_argument("zipfile")
     s.add_argument("output_zip")
     s.add_argument("num_properties", type=int, help="Number of properties to include")
+    
+    sp = subparsers.add_parser("split", help="Split bulk upload zip into multiple files with specified batch size")
+    sp.add_argument("zipfile")
+    sp.add_argument("output_prefix", help="Prefix for output zip files (will be appended with _1.zip, _2.zip, etc.)")
+    sp.add_argument("batch_size", type=int, help="Number of properties per output file")
+    sp.add_argument("--output_dir", "-o", help="Directory to save output files (default: current directory)")
 
     args = parser.parse_args(argv)
 
@@ -290,6 +326,26 @@ def main(argv=None):
         subset = data.subset(args.num_properties)
         subset.write_zip(args.output_zip)
         print(f"Wrote subset with {len(subset.properties)} properties to {args.output_zip}")
+    elif args.command == "split":
+        print(f"Loading data from {args.zipfile}...")
+        data, _ = BulkData.from_zip(args.zipfile)
+        batches = data.split(args.batch_size)
+        
+        print(f"Splitting {len(data.properties)} properties into {len(batches)} batches of up to {args.batch_size} properties each")
+        
+        # Create output directory if specified and doesn't exist
+        output_dir = args.output_dir if args.output_dir else ""
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            print(f"Created output directory: {output_dir}")
+        
+        for i, batch in enumerate(batches, 1):
+            filename = f"{args.output_prefix}_{i}.zip"
+            output_file = os.path.join(output_dir, filename) if output_dir else filename
+            batch.write_zip(output_file)
+            print(f"Batch {i}: Wrote {len(batch.properties)} properties to {output_file}")
+            
+        print(f"\nSuccessfully created {len(batches)} batch files")
     else:
         parser.print_help()
 

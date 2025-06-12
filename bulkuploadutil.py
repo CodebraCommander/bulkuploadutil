@@ -18,7 +18,7 @@ PROPERTY_PATTERN = re.compile(r"property_\d{8}\.txt")
 LINEITEM_PATTERN = re.compile(r"lineItems_\d{8}\.txt")
 HISTORICAL_PATTERN = re.compile(r"historical_\d{8}\.txt")
 
-REQUIRED_PROPERTY_FIELDS = ["EntityId", "DealName"]
+REQUIRED_PROPERTY_FIELDS = ["EntityID", "DealName"]
 REQUIRED_LINEITEM_FIELDS = ["LineItemId", "LineItemDescription", "redIQChartOfAccount", "IsExpenseAccount"]
 REQUIRED_HISTORY_FIELDS = ["EntityId", "LineItemId", "Date", "IsAnnual", "Value"]
 
@@ -26,8 +26,14 @@ REQUIRED_HISTORY_FIELDS = ["EntityId", "LineItemId", "Date", "IsAnnual", "Value"
 def read_tsv(file_bytes):
     text = io.TextIOWrapper(io.BytesIO(file_bytes), encoding="utf-8")
     reader = csv.DictReader(text, delimiter="\t")
-    rows = list(reader)
-    return reader.fieldnames, rows
+    # Convert fieldnames to lowercase for case-insensitive matching
+    fieldnames = {name.lower(): name for name in reader.fieldnames}
+    rows = []
+    for row in reader:
+        # Create a new dict with lowercase keys
+        new_row = {k.lower(): v for k, v in row.items()}
+        rows.append(new_row)
+    return fieldnames, rows
 
 
 class BulkData:
@@ -73,8 +79,8 @@ class BulkData:
 
     def subset(self, num_properties):
         subset_props = self.properties[:num_properties]
-        prop_ids = {p["EntityId"] for p in subset_props}
-        subset_history = [h for h in self.history if h["EntityId"] in prop_ids]
+        prop_ids = {p["EntityID"] for p in subset_props}
+        subset_history = [h for h in self.history if h["EntityID"] in prop_ids]
         lineitem_ids = {h["LineItemId"] for h in subset_history}
         subset_lineitems = [li for li in self.lineitems if li["LineItemId"] in lineitem_ids]
         return BulkData(subset_props, subset_lineitems, subset_history)
@@ -99,65 +105,139 @@ class BulkData:
 def validate(data: BulkData, fields):
     prop_fields, line_fields, hist_fields = fields
     errors = defaultdict(list)
+    stats = defaultdict(int)
 
-    # Check required fields
-    missing_prop = [f for f in REQUIRED_PROPERTY_FIELDS if f not in prop_fields]
-    if missing_prop:
-        errors["Missing Fields"].append(f"Property file: {', '.join(missing_prop)}")
+    # Check required fields in file headers (case-insensitive)
+    missing_prop_cols = [f for f in REQUIRED_PROPERTY_FIELDS if f.lower() not in prop_fields]
+    if missing_prop_cols:
+        errors["Missing Columns"].append(f"Property file is missing columns: {', '.join(missing_prop_cols)}")
 
-    missing_line = [f for f in REQUIRED_LINEITEM_FIELDS if f not in line_fields]
-    if missing_line:
-        errors["Missing Fields"].append(f"Line items file: {', '.join(missing_line)}")
+    missing_line_cols = [f for f in REQUIRED_LINEITEM_FIELDS if f.lower() not in line_fields]
+    if missing_line_cols:
+        errors["Missing Columns"].append(f"Line items file is missing columns: {', '.join(missing_line_cols)}")
 
-    missing_hist = [f for f in REQUIRED_HISTORY_FIELDS if f not in hist_fields]
-    if missing_hist:
-        errors["Missing Fields"].append(f"Historical file: {', '.join(missing_hist)}")
+    missing_hist_cols = [f for f in REQUIRED_HISTORY_FIELDS if f.lower() not in hist_fields]
+    if missing_hist_cols:
+        errors["Missing Columns"].append(f"Historical file is missing columns: {', '.join(missing_hist_cols)}")
 
     # Validate properties
     ids = set()
+    valid_props = set()
+    prop_case_variants = defaultdict(set)  # Track case variants of EntityIDs
+    
     for row in tqdm(data.properties, desc="Validating properties", leave=False):
-        eid = row.get("EntityId")
+        eid = row.get("entityid")  # Use lowercase key
         if not eid:
-            errors["Missing EntityId"].append("Property row")
-        elif eid in ids:
-            errors["Duplicate IDs"].append(f"EntityId {eid}")
+            errors["Missing Data"].append(f"Property row missing EntityID")
+            continue
+        if eid in ids:
+            errors["Duplicate IDs"].append(f"EntityID {eid}")
+            continue
         ids.add(eid)
-        if not row.get("DealName"):
-            errors["Missing DealName"].append(f"Property {eid}")
+        if not row.get("dealname"):  # Use lowercase key
+            errors["Missing Data"].append(f"Property {eid} missing DealName")
+            continue
+        valid_props.add(eid)
+        # Store the original case of the EntityID
+        prop_case_variants[eid.lower()].add(eid)
+        stats["Valid Properties"] += 1
 
     # Validate line items
     line_ids = set()
+    valid_lineitems = set()
     for row in tqdm(data.lineitems, desc="Validating line items", leave=False):
-        lid = row.get("LineItemId")
+        lid = row.get("lineitemid")  # Use lowercase key
         if not lid:
-            errors["Missing LineItemId"].append("Line item row")
-        elif lid in line_ids:
+            errors["Missing Data"].append(f"Line item row missing LineItemId")
+            continue
+        if lid in line_ids:
             errors["Duplicate IDs"].append(f"LineItemId {lid}")
+            continue
         line_ids.add(lid)
-        if not row.get("LineItemDescription"):
-            errors["Missing Description"].append(f"Line item {lid}")
-        if not row.get("redIQChartOfAccount"):
-            errors["Missing Chart of Account"].append(f"Line item {lid}")
-        if row.get("IsExpenseAccount") not in {"0", "1", 0, 1, True, False}:
-            errors["Invalid IsExpenseAccount"].append(f"Line item {lid}: {row.get('IsExpenseAccount')}")
+        if not row.get("lineitemdescription"):  # Use lowercase key
+            errors["Missing Data"].append(f"Line item {lid} missing description")
+            continue
+        if not row.get("rediqchartofaccount"):  # Use lowercase key
+            errors["Missing Data"].append(f"Line item {lid} missing redIQChartOfAccount")
+            continue
+        if row.get("isexpenseaccount") not in {"0", "1", 0, 1, True, False}:  # Use lowercase key
+            errors["Invalid Data"].append(f"Line item {lid} invalid IsExpenseAccount {row.get('isexpenseaccount')}")
+            continue
+        valid_lineitems.add(lid)
+        stats["Valid Line Items"] += 1
 
     # Validate history
     history_keys = set()
+    valid_history = 0
+    history_by_property = defaultdict(int)
+    history_by_lineitem = defaultdict(int)
+    hist_case_variants = defaultdict(set)  # Track case variants in history file
+    
     for idx, row in enumerate(tqdm(data.history, desc="Validating history", leave=False), 1):
-        eid = row.get("EntityId")
-        lid = row.get("LineItemId")
-        key = (eid, lid, row.get("Date"), row.get("IsAnnual"))
+        eid = row.get("entityid")  # Use lowercase key
+        lid = row.get("lineitemid")  # Use lowercase key
+        date = row.get("date")  # Use lowercase key
+        is_annual = row.get("isannual")  # Use lowercase key
+        value = row.get("value")  # Use lowercase key
+        
+        # Track case variants in history file
+        if eid:
+            hist_case_variants[eid.lower()].add(eid)
+        
+        # Track all history entries by property and line item
+        if eid:
+            history_by_property[eid] += 1
+        if lid:
+            history_by_lineitem[lid] += 1
+        
+        # Skip validation if missing required fields
+        if not all([eid, lid, date, is_annual, value]):
+            missing_fields = [f for f, v in [("EntityID", eid), ("LineItemId", lid), 
+                                           ("Date", date), ("IsAnnual", is_annual), 
+                                           ("Value", value)] if not v]
+            errors["Missing Data"].append(f"History row {idx} missing: {', '.join(missing_fields)}")
+            continue
+            
+        # Check for duplicates
+        key = (eid, lid, date, is_annual)
         if key in history_keys:
-            errors["Duplicate History"].append(f"Row {key}")
+            errors["Duplicate History"].append(f"Row {idx}: EntityID={eid}, LineItemId={lid}, Date={date}")
+            continue
         history_keys.add(key)
-        if eid not in ids:
-            errors["Invalid References"].append(f"History row {idx}: unknown EntityId {eid}")
-        if lid not in line_ids:
+        
+        # Check references
+        if eid not in valid_props:
+            errors["Invalid References"].append(f"History row {idx}: unknown EntityID {eid}")
+            continue
+        if lid not in valid_lineitems:
             errors["Invalid References"].append(f"History row {idx}: unknown LineItemId {lid}")
-        if not row.get("Value"):
-            errors["Missing Values"].append(f"History row {key}")
+            continue
+            
+        valid_history += 1
+        stats["Valid History Entries"] += 1
 
-    return errors
+    # Check for case sensitivity issues in EntityID references
+    case_sensitivity_issues = []
+    for eid_lower, prop_variants in prop_case_variants.items():
+        hist_variants = hist_case_variants.get(eid_lower, set())
+        if hist_variants and prop_variants != hist_variants:
+            case_sensitivity_issues.append(
+                f"EntityID case mismatch: Property file has {prop_variants}, History file has {hist_variants}"
+            )
+    
+    if case_sensitivity_issues:
+        errors["Case Sensitivity Issues"] = case_sensitivity_issues
+
+    # Calculate relationship statistics
+    props_with_history = sum(1 for count in history_by_property.values() if count > 0)
+    lineitems_with_history = sum(1 for count in history_by_lineitem.values() if count > 0)
+    
+    stats["Properties with History"] = props_with_history
+    stats["Line Items with History"] = lineitems_with_history
+    stats["Properties without History"] = len(valid_props) - props_with_history
+    stats["Line Items without History"] = len(valid_lineitems) - lineitems_with_history
+
+    return errors, stats
 
 
 def main(argv=None):
@@ -177,23 +257,38 @@ def main(argv=None):
     if args.command == "validate":
         print("Loading and validating data...")
         data, fields = BulkData.from_zip(args.zipfile)
-        errs = validate(data, fields)
+        errs, stats = validate(data, fields)
+        
+        print("\nData Summary:")
+        print("=" * 50)
+        print(f"Total Properties: {len(data.properties)}")
+        print(f"Total Line Items: {len(data.lineitems)}")
+        print(f"Total History Entries: {len(data.history)}")
+        print("\nValid Data:")
+        print(f"- Valid Properties: {stats['Valid Properties']}")
+        print(f"- Valid Line Items: {stats['Valid Line Items']}")
+        print(f"- Valid History Entries: {stats['Valid History Entries']}")
+        print("\nData Relationships:")
+        print(f"- Properties with History: {stats['Properties with History']}")
+        print(f"- Properties without History: {stats['Properties without History']}")
+        print(f"- Line Items with History: {stats['Line Items with History']}")
+        print(f"- Line Items without History: {stats['Line Items without History']}")
         
         if errs:
-            print("\nValidation Summary:")
+            print("\nValidation Issues:")
             print("=" * 50)
             for error_type, error_list in errs.items():
                 print(f"\n{error_type} ({len(error_list)}):")
-                for error in error_list:
+                # Only show first 5 examples of each error type
+                for error in error_list[:5]:
                     print(f"  - {error}")
+                if len(error_list) > 5:
+                    print(f"  ... and {len(error_list) - 5} more")
             print("\n" + "=" * 50)
             print(f"\nTotal issues found: {sum(len(err_list) for err_list in errs.values())}")
             sys.exit(1)
         else:
             print("\nValidation successful!")
-            print(f"Properties: {len(data.properties)}")
-            print(f"Line items: {len(data.lineitems)}")
-            print(f"History rows: {len(data.history)}")
     elif args.command == "subset":
         data, _ = BulkData.from_zip(args.zipfile)
         subset = data.subset(args.num_properties)

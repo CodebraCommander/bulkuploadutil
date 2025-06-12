@@ -134,7 +134,7 @@ def validate(data: BulkData, fields):
     # Validate properties
     ids = set()
     valid_props = set()
-    prop_case_variants = defaultdict(set)  # Track case variants of EntityIDs
+    valid_props_lower = set()  # Case-insensitive set for lookups
     
     for row in tqdm(data.properties, desc="Validating properties", leave=False):
         eid = row.get("entityid")  # Use lowercase key
@@ -149,13 +149,14 @@ def validate(data: BulkData, fields):
             errors["Missing Data"].append(f"Property {eid} missing DealName")
             continue
         valid_props.add(eid)
-        # Store the original case of the EntityID
-        prop_case_variants[eid.lower()].add(eid)
+        valid_props_lower.add(eid.lower())  # Add lowercase version for case-insensitive lookups
         stats["Valid Properties"] += 1
 
     # Validate line items
     line_ids = set()
     valid_lineitems = set()
+    valid_lineitems_lower = set()  # Case-insensitive set for lookups
+    
     for row in tqdm(data.lineitems, desc="Validating line items", leave=False):
         lid = row.get("lineitemid")  # Use lowercase key
         if not lid:
@@ -175,6 +176,7 @@ def validate(data: BulkData, fields):
             errors["Invalid Data"].append(f"Line item {lid} invalid IsExpenseAccount {row.get('isexpenseaccount')}")
             continue
         valid_lineitems.add(lid)
+        valid_lineitems_lower.add(lid.lower())  # Add lowercase version for case-insensitive lookups
         stats["Valid Line Items"] += 1
 
     # Validate history
@@ -182,7 +184,6 @@ def validate(data: BulkData, fields):
     valid_history = 0
     history_by_property = defaultdict(int)
     history_by_lineitem = defaultdict(int)
-    hist_case_variants = defaultdict(set)  # Track case variants in history file
     
     for idx, row in enumerate(tqdm(data.history, desc="Validating history", leave=False), 1):
         eid = row.get("entityid")  # Use lowercase key
@@ -191,14 +192,10 @@ def validate(data: BulkData, fields):
         is_annual = row.get("isannual")  # Use lowercase key
         value = row.get("value")  # Use lowercase key
         
-        # Track case variants in history file
-        if eid:
-            hist_case_variants[eid.lower()].add(eid)
-        
-        # Track all history entries by property and line item
-        if eid:
+        # Track all history entries by property and line item, but only for valid properties/line items
+        if eid and eid.lower() in valid_props_lower:
             history_by_property[eid] += 1
-        if lid:
+        if lid and lid.lower() in valid_lineitems_lower:
             history_by_lineitem[lid] += 1
         
         # Skip validation if missing required fields
@@ -210,34 +207,22 @@ def validate(data: BulkData, fields):
             continue
             
         # Check for duplicates
-        key = (eid, lid, date, is_annual)
+        key = (eid.lower(), lid.lower(), date, is_annual)  # Use lowercase for case-insensitive duplicate check
         if key in history_keys:
             errors["Duplicate History"].append(f"Row {idx}: EntityID={eid}, LineItemId={lid}, Date={date}")
             continue
         history_keys.add(key)
         
-        # Check references
-        if eid not in valid_props:
+        # Check references - case insensitive
+        if eid.lower() not in valid_props_lower:
             errors["Invalid References"].append(f"History row {idx}: unknown EntityID {eid}")
             continue
-        if lid not in valid_lineitems:
+        if lid.lower() not in valid_lineitems_lower:
             errors["Invalid References"].append(f"History row {idx}: unknown LineItemId {lid}")
             continue
             
         valid_history += 1
         stats["Valid History Entries"] += 1
-
-    # Check for case sensitivity issues in EntityID references
-    case_sensitivity_issues = []
-    for eid_lower, prop_variants in prop_case_variants.items():
-        hist_variants = hist_case_variants.get(eid_lower, set())
-        if hist_variants and prop_variants != hist_variants:
-            case_sensitivity_issues.append(
-                f"EntityID case mismatch: Property file has {prop_variants}, History file has {hist_variants}"
-            )
-    
-    if case_sensitivity_issues:
-        errors["Case Sensitivity Issues"] = case_sensitivity_issues
 
     # Calculate relationship statistics
     props_with_history = sum(1 for count in history_by_property.values() if count > 0)

@@ -79,10 +79,21 @@ class BulkData:
 
     def subset(self, num_properties):
         subset_props = self.properties[:num_properties]
-        prop_ids = {p["entityid"] for p in subset_props}
-        subset_history = [h for h in self.history if h["entityid"] in prop_ids]
-        lineitem_ids = {h["lineitemid"] for h in subset_history}
-        subset_lineitems = [li for li in self.lineitems if li["lineitemid"] in lineitem_ids]
+        
+        # Create case-insensitive sets for matching
+        prop_ids_lower = {p["entityid"].lower() if p["entityid"] else "" for p in subset_props}
+        
+        # Use case-insensitive matching for history entries
+        subset_history = [h for h in self.history 
+                         if h["entityid"] and h["entityid"].lower() in prop_ids_lower]
+        
+        # Create case-insensitive set of line item IDs
+        lineitem_ids_lower = {h["lineitemid"].lower() if h["lineitemid"] else "" for h in subset_history}
+        
+        # Use case-insensitive matching for line items
+        subset_lineitems = [li for li in self.lineitems 
+                           if li["lineitemid"] and li["lineitemid"].lower() in lineitem_ids_lower]
+        
         return BulkData(subset_props, subset_lineitems, subset_history)
 
     def write_zip(self, path, date_suffix="20200101"):

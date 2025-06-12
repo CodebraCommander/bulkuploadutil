@@ -5,6 +5,14 @@ import io
 import re
 import sys
 import zipfile
+import os
+import logging
+from tqdm import tqdm
+from collections import defaultdict
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
 
 PROPERTY_PATTERN = re.compile(r"property_\d{8}\.txt")
 LINEITEM_PATTERN = re.compile(r"lineItems_\d{8}\.txt")
@@ -32,19 +40,30 @@ class BulkData:
     def from_zip(cls, zip_path):
         with zipfile.ZipFile(zip_path, "r") as zf:
             prop_file = lineitem_file = hist_file = None
+            logger.info(f"\nSearching for files matching patterns:")
+            logger.info(f"- Property pattern: {PROPERTY_PATTERN.pattern}")
+            logger.info(f"- Line items pattern: {LINEITEM_PATTERN.pattern}")
+            logger.info(f"- Historical pattern: {HISTORICAL_PATTERN.pattern}")
+            logger.info("\nFiles found in zip:")
             for name in zf.namelist():
-                if PROPERTY_PATTERN.fullmatch(name):
+                basename = os.path.basename(name)
+                logger.info(f"- {basename}")
+                if PROPERTY_PATTERN.fullmatch(basename):
                     prop_file = name
-                elif LINEITEM_PATTERN.fullmatch(name):
+                    logger.info(f"  ✓ Matches property pattern")
+                elif LINEITEM_PATTERN.fullmatch(basename):
                     lineitem_file = name
-                elif HISTORICAL_PATTERN.fullmatch(name):
+                    logger.info(f"  ✓ Matches line items pattern")
+                elif HISTORICAL_PATTERN.fullmatch(basename):
                     hist_file = name
+                    logger.info(f"  ✓ Matches historical pattern")
             if not (prop_file and lineitem_file and hist_file):
                 missing = [
                     nm for nm, val in
                     {"property file": prop_file, "line items file": lineitem_file, "historical file": hist_file}.items()
                     if not val
                 ]
+                logger.error(f"\nMissing required files: {', '.join(missing)}")
                 raise ValueError(f"Missing required files: {', '.join(missing)}")
 
             prop_fields, prop_rows = read_tsv(zf.read(prop_file))
@@ -79,60 +98,65 @@ class BulkData:
 
 def validate(data: BulkData, fields):
     prop_fields, line_fields, hist_fields = fields
-    errors = []
+    errors = defaultdict(list)
 
+    # Check required fields
     missing_prop = [f for f in REQUIRED_PROPERTY_FIELDS if f not in prop_fields]
     if missing_prop:
-        errors.append(f"Property file missing fields: {', '.join(missing_prop)}")
+        errors["Missing Fields"].append(f"Property file: {', '.join(missing_prop)}")
 
     missing_line = [f for f in REQUIRED_LINEITEM_FIELDS if f not in line_fields]
     if missing_line:
-        errors.append(f"Line items file missing fields: {', '.join(missing_line)}")
+        errors["Missing Fields"].append(f"Line items file: {', '.join(missing_line)}")
 
     missing_hist = [f for f in REQUIRED_HISTORY_FIELDS if f not in hist_fields]
     if missing_hist:
-        errors.append(f"Historical file missing fields: {', '.join(missing_hist)}")
+        errors["Missing Fields"].append(f"Historical file: {', '.join(missing_hist)}")
 
+    # Validate properties
     ids = set()
-    for row in data.properties:
+    for row in tqdm(data.properties, desc="Validating properties", leave=False):
         eid = row.get("EntityId")
         if not eid:
-            errors.append("Property row missing EntityId")
+            errors["Missing EntityId"].append("Property row")
         elif eid in ids:
-            errors.append(f"Duplicate EntityId {eid}")
+            errors["Duplicate IDs"].append(f"EntityId {eid}")
         ids.add(eid)
         if not row.get("DealName"):
-            errors.append(f"Property {eid} missing DealName")
+            errors["Missing DealName"].append(f"Property {eid}")
 
+    # Validate line items
     line_ids = set()
-    for row in data.lineitems:
+    for row in tqdm(data.lineitems, desc="Validating line items", leave=False):
         lid = row.get("LineItemId")
         if not lid:
-            errors.append("Line item row missing LineItemId")
+            errors["Missing LineItemId"].append("Line item row")
         elif lid in line_ids:
-            errors.append(f"Duplicate LineItemId {lid}")
+            errors["Duplicate IDs"].append(f"LineItemId {lid}")
         line_ids.add(lid)
         if not row.get("LineItemDescription"):
-            errors.append(f"Line item {lid} missing description")
+            errors["Missing Description"].append(f"Line item {lid}")
         if not row.get("redIQChartOfAccount"):
-            errors.append(f"Line item {lid} missing redIQChartOfAccount")
+            errors["Missing Chart of Account"].append(f"Line item {lid}")
         if row.get("IsExpenseAccount") not in {"0", "1", 0, 1, True, False}:
-            errors.append(f"Line item {lid} invalid IsExpenseAccount {row.get('IsExpenseAccount')}")
+            errors["Invalid IsExpenseAccount"].append(f"Line item {lid}: {row.get('IsExpenseAccount')}")
 
+    # Validate history
     history_keys = set()
-    for idx, row in enumerate(data.history, 1):
+    for idx, row in enumerate(tqdm(data.history, desc="Validating history", leave=False), 1):
         eid = row.get("EntityId")
         lid = row.get("LineItemId")
         key = (eid, lid, row.get("Date"), row.get("IsAnnual"))
         if key in history_keys:
-            errors.append(f"Duplicate history row {key}")
+            errors["Duplicate History"].append(f"Row {key}")
         history_keys.add(key)
         if eid not in ids:
-            errors.append(f"History row {idx} references unknown EntityId {eid}")
+            errors["Invalid References"].append(f"History row {idx}: unknown EntityId {eid}")
         if lid not in line_ids:
-            errors.append(f"History row {idx} references unknown LineItemId {lid}")
+            errors["Invalid References"].append(f"History row {idx}: unknown LineItemId {lid}")
         if not row.get("Value"):
-            errors.append(f"History row {key} missing Value")
+            errors["Missing Values"].append(f"History row {key}")
+
     return errors
 
 
@@ -151,16 +175,25 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "validate":
+        print("Loading and validating data...")
         data, fields = BulkData.from_zip(args.zipfile)
         errs = validate(data, fields)
+        
         if errs:
-            print("Validation failed:")
-            for e in errs:
-                print(" -", e)
+            print("\nValidation Summary:")
+            print("=" * 50)
+            for error_type, error_list in errs.items():
+                print(f"\n{error_type} ({len(error_list)}):")
+                for error in error_list:
+                    print(f"  - {error}")
+            print("\n" + "=" * 50)
+            print(f"\nTotal issues found: {sum(len(err_list) for err_list in errs.values())}")
             sys.exit(1)
         else:
-            print("Validation successful.\nProperties: {}\nLine items: {}\nHistory rows: {}".format(
-                len(data.properties), len(data.lineitems), len(data.history)))
+            print("\nValidation successful!")
+            print(f"Properties: {len(data.properties)}")
+            print(f"Line items: {len(data.lineitems)}")
+            print(f"History rows: {len(data.history)}")
     elif args.command == "subset":
         data, _ = BulkData.from_zip(args.zipfile)
         subset = data.subset(args.num_properties)
